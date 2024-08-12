@@ -18,8 +18,6 @@ class SpeechSlicer:
         self.overwrite = args.overwrite
         self.model = args.model
         self.llm_merging = args.llm_merging
-        self.subtitle_available = args.subtitle_available
-        self.subtitle_path = args.subtitle_path
         self.output_path = args.output_path
         self.padding = args.padding
         self.recursive_depth = args.recursive_depth
