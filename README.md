@@ -20,9 +20,18 @@ A repository for extracting setence-by-sentence speech files from audio files or
 Install torch 2.0+ compatible to your environment, e.g.:
 
 ```
+conda install pytorch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 pytorch-cuda=12.1 -c pytorch -c nvidia
+```
+or
+```
 pip install torch==2.3.1 torchvision==0.18.1 torchaudio==2.3.1 --index-url https://download.pytorch.org/whl/cu121
 ```
 
+Install `ffmpeg`. If you are using conda, run
+```
+conda install conda-forge::ffmpeg
+```
+Install the other dependencies:
 ```
 pip install -r requirements.txt
 ```
