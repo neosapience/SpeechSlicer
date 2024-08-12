@@ -2,3 +2,4 @@ natsort
 pydub
 transformers
 openai
+accelerate
