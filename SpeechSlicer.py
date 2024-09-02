@@ -1,7 +1,7 @@
 import os
 import json
 from natsort import natsorted
-from utils import get_answer
+from utils import get_answer, contains_unicode_pattern
 from pydub import AudioSegment
 from tqdm import tqdm
 import torch
@@ -9,6 +9,9 @@ import shutil
 from transformers import AutoModelForSpeechSeq2Seq, AutoProcessor, pipeline
 import ast
 import fnmatch
+import sys
+import traceback
+from silero_vad import load_silero_vad, read_audio, get_speech_timestamps
 
 class SpeechSlicer:
     def __init__(self, args):
@@ -21,6 +24,7 @@ class SpeechSlicer:
         self.output_path = args.output_path
         self.padding = args.padding
         self.recursive_depth = args.recursive_depth
+        self.vad_model = load_silero_vad()
 
         with open("./api_key.txt", "r") as f:
             api_key = f.read().strip("\n\"\'")
@@ -58,7 +62,7 @@ class SpeechSlicer:
             if not self.overwrite:
                 if os.path.exists(os.path.join(self.output_path, "wav", '.'.join(os.path.basename(f).split('.')[:-1]) + '.wav')):
                     continue
-            convert_cmd = f"ffmpeg -i \"{f}\" -ab 160k -ac 2 -ar 44100 -vn \"{os.path.join(self.output_path, 'wav', '.'.join(os.path.basename(f).split('.')[:-1]) + '.wav')}\""
+            convert_cmd = f"ffmpeg -i \'{f}\' -ab 160k -ac 2 -ar 44100 -vn \'{os.path.join(self.output_path, 'wav', '.'.join(os.path.basename(f).split('.')[:-1]) + '.wav')}\'"
             os.system(convert_cmd)
         self.input_path = os.path.join(self.output_path, "wav")
         self.extension = "wav"
@@ -152,8 +156,14 @@ class SpeechSlicer:
                     torch_dtype=torch_dtype,
                     device=device,
                 )
-
-            result = pipe(f)
+            try:
+                result = pipe(f)
+            except:
+                with open("error.txt", "a") as ert:
+                    ert.write(f)
+                    ert.write("\n")
+                continue
+                
             duplicate = [None]
             final = []
             for chunk in result["chunks"]:
@@ -191,14 +201,15 @@ class SpeechSlicer:
                 if os.path.exists(os.path.join(os.path.join(self.output_path, "cut_wav", str(level), movie_name, clip_name + "_000.wav"))):
                     continue
                 
-            else:
-                if not os.path.exists(os.path.join(os.path.join(self.output_path, "cut_wav", str(level), movie_name))):
-                    os.mkdir(os.path.join(os.path.join(self.output_path, "cut_wav", str(level), movie_name)))
+            if not os.path.exists(os.path.join(os.path.join(self.output_path, "cut_wav", str(level), movie_name))):
+                os.mkdir(os.path.join(os.path.join(self.output_path, "cut_wav", str(level), movie_name)))
 
             
             self.asr_to_slice[self.wav_to_asr[f]] = []
 
             if llm_merged:
+                if not os.path.exists(self.wav_to_asr[f].replace(f"/asr/{level}/", "/llm_merged/")):
+                    continue
                 with open(self.wav_to_asr[f].replace(f"/asr/{level}/", "/llm_merged/"), "r") as g:
                     j = json.load(g)
             else:
@@ -216,7 +227,7 @@ class SpeechSlicer:
                 if j[tidx]["timestamp"][1]:
                     j[tidx]["timestamp"][1] += 0.25
             for idx, a in enumerate(j):
-                if not self.overwrite and os.path.exists(os.path.join(os.path.join(self.output_path, "cut_wav", str(level), movie_name, clip_name + f"_{idx:03d}.wav"))):
+                if not self.overwrite and os.path.exists(os.path.join(self.output_path, "cut_wav", str(level), movie_name, clip_name + f"_{idx:03d}.wav")):
                     continue
 
                 start = a["timestamp"][0]
@@ -288,35 +299,102 @@ class SpeechSlicer:
                 numbered_text = ""
                 for aidx, a in enumerate(j):
                     numbered_text += f"{aidx+1}. {a['text'].strip()}\n"
-                system_prompt = "You are a professional movie scenario editor. You will be given with the utterances of the characters. Some of the utterances are done by a single character, but splitted into multiple lines. Merge the sentences if they seem to be splitted unnecessarily. Your answer must be a list of lists, which includes utterances to merge, like [[1], [2], ..., [19, 20, 21], [22, 23]]. The utterances that need not to be merged must be in a single-element list. Show only the list of lists as your output."
+                system_prompt = "You are a professional movie scenario editor. You will be given with the utterances of the characters. Some of the utterances are done by a single character, but splitted into multiple lines. Merge the sentences if they seem to be splitted unnecessarily. Your answer must be a list of lists, which includes utterances to merge, like [[1], [2], ..., [19, 20, 21], [22, 23]]. The utterances that need not to be merged must be in a single-element list. The indices must be completely sorted and each index must only be used once. Show only the list of lists as your output."
                 prompt = numbered_text
 
-                response = get_answer(prompt, system_prompt=system_prompt, api_key=self.api_key).strip()
-
+                response = "[[" + get_answer(prompt, system_prompt=system_prompt, api_key=self.api_key).strip("[] ") + "]]"
+                
+                trial = 0
                 while True:
+                    if trial > 4:
+                        print("Something is wrong. Check the outputs.")
+                        sys.exit()
                     try:
+                        filtered_response_list = []
                         response_list = ast.literal_eval(response)
-                        break
-                    except:
-                        print("Formatting error...")
-                        continue
+                        for response_idx, _ in enumerate(response_list):
+                            filtered_response_list.append([])
+                            for utterance_idx, utterance in enumerate(response_list[response_idx]):
+                                if int(utterance) <= len(j):
+                                    filtered_response_list[response_idx].append(utterance)
+                            if len(filtered_response_list[-1]) < 1:
+                                del filtered_response_list[-1]
 
-                idx_cnt = 0
-                for r in response_list:
-                    if len(r) < 2:
-                        new_j.append(j[idx_cnt])
-                        idx_cnt += 1
-                    else:
-                        newr = {"timestamp":[], "text": ""}
-                        newr["timestamp"] = [j[r[0]-1]["timestamp"][0], j[r[-1]-1]["timestamp"][-1]]
-                        for k in r:
-                            newr["text"] += j[k-1]["text"]
-                            
-                        new_j.append(newr)
-                        idx_cnt += len(r)
+                        list_of_tuples = [tuple(lst) for lst in filtered_response_list]
+                        unique_tuples = set(list_of_tuples)
+                        unique_list_of_lists = [sorted(list(set(tpl))) for tpl in unique_tuples]
+                        filtered_response_list = sorted(unique_list_of_lists)
+
+                        to_add = []
+                        idx_cnt = 0
+                        for r in filtered_response_list:
+                            if len(r) < 2:
+                                to_add.append(j[idx_cnt])
+                                idx_cnt += 1
+                            else:
+                                newr = {"timestamp":[], "text": ""}
+                                newr["timestamp"] = [j[r[0]-1]["timestamp"][0], j[r[-1]-1]["timestamp"][-1]]
+                                for k in r:
+                                    newr["text"] += j[k-1]["text"]
+        
+                                to_add.append(newr)
+                                idx_cnt += len(r)
+                        new_j += to_add
+                        break
+                    except Exception as e:
+                        print("Error:", traceback.format_exc())
+                        print()
+                        trial += 1
+                        continue
 
             with open(os.path.join(self.output_path, "llm_merged", movie_name, file_name), "w") as f:
                 json.dump(new_j, f, indent=4)
+
+    def post_process(self, index):
+        print()
+        print("Performing post-processing..")
+        self.set_input_files(os.path.join(self.output_path, "cut_wav", str(index)), "wav")
+        if not os.path.exists(os.path.join(self.output_path, "final", "speech")):
+            os.makedirs(os.path.join(self.output_path, "final", "speech"))
+        if not os.path.exists(os.path.join(self.output_path, "final", "transcription")):
+            os.makedirs(os.path.join(self.output_path, "final", "transcription"))
+            
+        to_remove = ""
+        for f in tqdm(self.input_files):
+            try:
+                wav = read_audio(f)
+            except:
+                continue
+            file_idx = int(f[-7:-4])
+            corresponding_json = f.replace(f"/cut_wav/{str(index)}/", "/llm_merged/")[:-8] + ".json"
+
+            clip_name = "_".join(os.path.basename(f).split("_")[:-self.recursive_depth])
+            try:
+                segment_len = len(AudioSegment.from_file(f))/1000
+            except:
+                continue
+
+            if os.path.exists(os.path.join(self.output_path, "final", "transcription", clip_name, os.path.basename(f)[:-4] + ".json")):
+                continue
+
+            with open(corresponding_json, "r") as cj:
+                j = json.load(cj)[file_idx]
+
+            if contains_unicode_pattern(j["text"]):
+                continue
+
+            vad_result = get_speech_timestamps(wav, self.vad_model)
+            if len(vad_result) < 1:
+                continue
+            
+            if not os.path.exists(os.path.join(self.output_path, "final", "speech", clip_name)):
+                os.makedirs(os.path.join(self.output_path, "final", "speech", clip_name))
+            if not os.path.exists(os.path.join(self.output_path, "final", "transcription", clip_name)):
+                os.makedirs(os.path.join(self.output_path, "final", "transcription", clip_name))
+
+            shutil.copy(f, os.path.join(self.output_path, "final", "speech", clip_name))
+            with open(os.path.join(self.output_path, "final", "transcription", clip_name, os.path.basename(f)[:-4] + ".json"), "w") as out:
+                json.dump([j], out, indent=4)
 
     def slice(self):
         if self.file_type == "video":
@@ -330,5 +408,4 @@ class SpeechSlicer:
 
         self.llm_merge()
         self.cut_wav(i, llm_merged=True)
-
-        
+        self.post_process(i)
