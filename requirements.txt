@@ -3,3 +3,4 @@ pydub
 transformers
 openai
 accelerate
+silero-vad
