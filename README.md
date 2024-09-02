@@ -53,4 +53,4 @@ For further details, check the help messages by `python slice_speech.py --help`.
 - [X] Audio Slicing with Sliding
 - [X] Recursive Whisper
 - [X] LLM Merging
-- [ ] Postprocessing with length and VAD 
+- [X] Postprocessing with length and VAD 
